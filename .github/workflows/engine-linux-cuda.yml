@@ -17,6 +17,10 @@ on:
         description: Engine tag this commit belongs to (PINNED_TAG)
         required: true
         default: master-1117-0d71f96
+      repack:
+        description: Do not compile again; pack the sd-server of the existing release for this tag anew
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -31,11 +35,23 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake build-essential ca-certificates
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake build-essential ca-certificates patchelf curl
           # The engine does not use NCCL, and a machine without it could not start an engine linked against it.
           apt-get purge -y --allow-change-held-packages 'libnccl*' || true
 
+      - name: Take sd-server from the existing release
+        if: ${{ inputs.repack }}
+        env:
+          TAG: engine-${{ inputs.tag }}
+        run: |
+          mkdir -p build src
+          curl -fsSL -o old.tar.gz "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/sd-server-linux-cuda12.tar.gz"
+          tar -C build -xzf old.tar.gz sd-server LICENSE
+          mv build/LICENSE src/LICENSE
+          rm old.tar.gz
+
       - name: Get the pinned source
+        if: ${{ !inputs.repack }}
         env:
           COMMIT: ${{ inputs.commit }}
         run: |
@@ -49,6 +65,7 @@ jobs:
           git submodule update -q --init --recursive --depth 1
 
       - name: Build sd-server
+        if: ${{ !inputs.repack }}
         # 75 = T4, 80 = A100, 89 = L4, 90 = H100. Newer cards run the newest of these.
         run: |
           cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DSD_CUDA=ON -DBUILD_SHARED_LIBS=OFF \
@@ -61,10 +78,20 @@ jobs:
           cp "$(find build -type f -name sd-server | head -n 1)" out/sd-server
           cp src/LICENSE out/LICENSE
           strip out/sd-server
+          # Carry the CUDA libraries along, and make the engine look next to itself first, so it does not
+          # depend on which CUDA version the machine that runs it happens to have. Only the driver's own
+          # libcuda.so.1 comes from that machine.
+          mkdir out/lib
+          for name in libcublas.so.12 libcublasLt.so.12 libcudart.so.12 libgomp.so.1; do
+            cp -L "$(ldd out/sd-server | awk -v n="$name" '$1 == n { print $3 }')" "out/lib/$name"
+          done
+          patchelf --force-rpath --set-rpath '$ORIGIN/lib' out/sd-server
+          cp /usr/local/cuda/EULA.txt out/lib/NVIDIA-CUDA-EULA.txt 2>/dev/null || true
           ls -l out/sd-server
           ldd out/sd-server || true
           if ldd out/sd-server | grep -q nccl; then echo 'still linked against NCCL'; exit 1; fi
-          tar -C out -czf sd-server-linux-cuda12.tar.gz sd-server LICENSE
+          ldd out/sd-server | grep -E 'cublas|cudart' | grep -q '/out/lib/' || { echo 'the engine does not use the libraries packed with it'; exit 1; }
+          tar -C out -czf sd-server-linux-cuda12.tar.gz sd-server LICENSE lib
           sha256sum sd-server-linux-cuda12.tar.gz | tee sd-server-linux-cuda12.tar.gz.sha256
 
       - uses: actions/upload-artifact@v4

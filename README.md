@@ -1,4 +1,4 @@
-﻿# canvasforge-engine
+# canvasforge-engine
 
 Ready-made builds of `sd-server` from [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 (MIT license) for Linux with CUDA 12, built unmodified from a pinned commit.
@@ -13,3 +13,7 @@ GPU session takes many minutes; downloading one takes seconds.
   runtime libraries.
 
 The license of the engine is in each archive and in `LICENSE-stable-diffusion.cpp` upstream.
+
+Each archive also carries the CUDA 12 runtime libraries the engine needs (cuBLAS and the CUDA runtime, in `lib/`,
+redistributed under the NVIDIA CUDA EULA included there), so the engine does not depend on the CUDA version of the
+machine that runs it. That machine needs only an NVIDIA driver.
