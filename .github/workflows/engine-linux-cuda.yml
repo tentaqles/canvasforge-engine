@@ -1,0 +1,90 @@
+# Builds the image engine (stable-diffusion.cpp's sd-server, MIT licence, unmodified) for Linux with CUDA,
+# once per engine version, so a Colab GPU can download it in seconds instead of compiling it for many minutes.
+#
+# Run it by hand (Actions > Build Linux CUDA engine > Run workflow) whenever PINNED_TAG / SDCPP_COMMIT change.
+# The result is a release named engine-<tag> with sd-server-linux-cuda12.tar.gz and its SHA-256.
+# Then fill PREBUILT_ENGINE_URL and PREBUILT_ENGINE_SHA256 in src/main/services/colab/setup.ts.
+name: Build Linux CUDA engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full commit of stable-diffusion.cpp (SDCPP_COMMIT)
+        required: true
+        default: 0d71f963af9c94941f4a67e8ea145935651dd756
+      tag:
+        description: Engine tag this commit belongs to (PINNED_TAG)
+        required: true
+        default: master-1117-0d71f96
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    # Ubuntu 22.04 and CUDA 12: what Colab runs. A binary built against an older CUDA 12 runs on a newer one.
+    container: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake build-essential ca-certificates
+
+      - name: Get the pinned source
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          echo "$COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          mkdir src && cd src
+          git init -q
+          git remote add origin https://github.com/leejet/stable-diffusion.cpp
+          git fetch -q --depth 1 origin "$COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          git submodule update -q --init --recursive --depth 1
+
+      - name: Build sd-server
+        # 75 = T4, 80 = A100, 89 = L4, 90 = H100. Newer cards run the newest of these.
+        run: |
+          cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DSD_CUDA=ON -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF "-DCMAKE_CUDA_ARCHITECTURES=75;80;89;90"
+          cmake --build build --target sd-server --parallel "$(nproc)"
+
+      - name: Pack
+        run: |
+          mkdir out
+          cp "$(find build -type f -name sd-server | head -n 1)" out/sd-server
+          cp src/LICENSE out/LICENSE
+          strip out/sd-server
+          ldd out/sd-server || true
+          tar -C out -czf sd-server-linux-cuda12.tar.gz sd-server LICENSE
+          sha256sum sd-server-linux-cuda12.tar.gz | tee sd-server-linux-cuda12.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine
+          path: |
+            sd-server-linux-cuda12.tar.gz
+            sd-server-linux-cuda12.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+      - name: Publish as a release of this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: engine-${{ inputs.tag }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Image engine for Linux with CUDA ($TAG)" \
+              --notes "sd-server from stable-diffusion.cpp (MIT licence), commit $COMMIT, built unmodified for Linux with CUDA 12."
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber sd-server-linux-cuda12.tar.gz sd-server-linux-cuda12.tar.gz.sha256
