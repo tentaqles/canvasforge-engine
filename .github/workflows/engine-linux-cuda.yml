@@ -32,6 +32,8 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git cmake build-essential ca-certificates
+          # The engine does not use NCCL, and a machine without it could not start an engine linked against it.
+          apt-get purge -y --allow-change-held-packages 'libnccl*' || true
 
       - name: Get the pinned source
         env:
@@ -50,7 +52,7 @@ jobs:
         # 75 = T4, 80 = A100, 89 = L4, 90 = H100. Newer cards run the newest of these.
         run: |
           cmake -S src -B build -DCMAKE_BUILD_TYPE=Release -DSD_CUDA=ON -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_NATIVE=OFF "-DCMAKE_CUDA_ARCHITECTURES=75;80;89;90"
+            -DGGML_NATIVE=OFF "-DCMAKE_CUDA_ARCHITECTURES=75;80;89;90" "-DCMAKE_EXE_LINKER_FLAGS=-Wl,--as-needed"
           cmake --build build --target sd-server --parallel "$(nproc)"
 
       - name: Pack
@@ -59,7 +61,9 @@ jobs:
           cp "$(find build -type f -name sd-server | head -n 1)" out/sd-server
           cp src/LICENSE out/LICENSE
           strip out/sd-server
+          ls -l out/sd-server
           ldd out/sd-server || true
+          if ldd out/sd-server | grep -q nccl; then echo 'still linked against NCCL'; exit 1; fi
           tar -C out -czf sd-server-linux-cuda12.tar.gz sd-server LICENSE
           sha256sum sd-server-linux-cuda12.tar.gz | tee sd-server-linux-cuda12.tar.gz.sha256
 
